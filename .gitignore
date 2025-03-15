@@ -1,0 +1,7 @@
+# Ignore build artifacts
+/build/
+/sdkconfig
+/sdkconfig.*
+/CMakeCache.txt
+/.vscode/
+/*.log
