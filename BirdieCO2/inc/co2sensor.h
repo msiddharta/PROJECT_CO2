@@ -24,13 +24,13 @@
 #define REG_CALIB_REF_H     0x0D  // Calibration reference high byte
 #define REG_CALIB_REF_L     0x0E  // Calibration reference low byte
 #define REG_SENS_RST        0x10  // Reset register (to apply calibration)
-#define REG_MEAS_CFG        0x04  // Measurement configuration register
 
 // Function Declarations
 void co2sensor_init();
 void co2sensor_calibrate(uint16_t ref_co2_ppm);
 void co2sensor_enable_aboc();
 bool co2sensor_is_data_ready();
+void wait_for_data_ready();
 uint16_t co2sensor_read_co2();
 void i2c_scan();
 void trigger_single_measurement();
