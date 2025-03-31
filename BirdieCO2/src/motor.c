@@ -2,8 +2,6 @@
 #include "esp_log.h"
 #include "driver/mcpwm_prelude.h"
 #include "esp_mac.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 static const char *TAG = "Motor";
 
@@ -63,22 +61,6 @@ void motor_init() {
 }
 
 void motor_set_angle(int angle) {
-    static int current_angle = -1;
-    if (current_angle == -1) {
-        current_angle = angle;
-    }
-
-    ESP_LOGI(TAG, "Target angle: %d°", angle);
-
-    int step = (angle > current_angle) ? 1 : -1;
-
-    for (int a = current_angle; a != angle; a += step) {
-        ESP_LOGI(TAG, "Stepping to: %d°", a);
-        ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(comparator, angle_to_compare(a)));
-        vTaskDelay(pdMS_TO_TICKS(15));  // smoothness delay
-    }
-
-    ESP_LOGI(TAG, "Final angle reached: %d°", angle);
+    ESP_LOGI(TAG, "Setting angle to: %d", angle);
     ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(comparator, angle_to_compare(angle)));
-    current_angle = angle;
 }
