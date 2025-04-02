@@ -5,31 +5,63 @@
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "esp_sleep.h"
+#include "mqtt_client.h"
+#include "esp_wifi.h"
+#include "nvs_flash.h"
 
 #include "motor.h"
 #include "co2sensor.h"
 #include "max17048_adv.h"  // The advanced IDF-based code for MAX17048
 #include "i2c_bus.h"     // The I2C bus driver
 #include "battery.h"     // The battery monitor code
+#include "mqtt.h"       // The MQTT client code
 
 // FreeRTOS event bits
 #define CO2_HIGH_EVENT (1 << 0)
 #define CO2_LOW_EVENT  (1 << 1)
 
-// We'll store the event group for coordinating motor tasks
 static EventGroupHandle_t xCO2EventGroup = NULL;
-
-static const char *TAG_BATT = "BATTERY";
 static const char *TAG_MAIN = "MAIN";
 static const char *TAG_CO2 = "CO2";
 static const char *TAG_MOTOR = "MOTOR";
+static const char *TAG_WIFI = "WIFI";
+static const char *TAG_BATT = "BATT";
 
-RTC_DATA_ATTR int last_motor_angle = -1;  // -1 means unknown
+RTC_DATA_ATTR int last_motor_angle = -1;
+
+extern void wifi_init_sta(void);
+extern void mqtt_start(void);
+extern void publish_data(uint16_t co2_ppm, float voltage, float soc);
+
+
 // ---------------------------------------------------------------------
 // Motor task: waits for CO2 events to set servo angle
 // ---------------------------------------------------------------------
 static void motor_task(void *pvParameters) {
-    int current_angle = last_motor_angle;  // unknown at startup
+    // Check wakeup reason
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    bool fresh_boot = (wakeup_reason != ESP_SLEEP_WAKEUP_TIMER);
+
+    motor_init(); // Initialize the motor (servo)
+
+    if (fresh_boot) {
+        ESP_LOGI(TAG_MOTOR, "Cold boot motor test: 0° to 90° to 0°");
+        motor_set_angle(0);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        motor_set_angle(90);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        motor_set_angle(0);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        last_motor_angle = 0;  // Ensure alignment
+    }
+    
+    // Restore last known angle from RTC memory
+    if (last_motor_angle >= 0) {
+        ESP_LOGI(TAG_MOTOR, "Restoring last motor angle: %d°", last_motor_angle);
+        motor_set_angle(last_motor_angle);
+    }
+
+    int current_angle = last_motor_angle;
 
     while (true)
     {
@@ -110,6 +142,16 @@ static void co2sensor_task(void *pvParameters)
     else
         xEventGroupSetBits(xCO2EventGroup, CO2_LOW_EVENT);
 
+    
+    // Publish data to MQTT broker
+    float voltage = battery_get_voltage();
+    float soc = battery_get_soc();
+    publish_data(median, voltage, soc);
+
+    ESP_LOGI(TAG_WIFI, "Stopping Wi-Fi and MQTT client");
+    //mqtt_stop();
+    //esp_wifi_stop();
+
     ESP_LOGI(TAG_CO2, "Preparing to enter deep sleep for 9 minutes...");
     esp_sleep_enable_timer_wakeup(9 * 60 * 1000000ULL);  // 9 min in µs
     vTaskDelay(pdMS_TO_TICKS(200));  // Let logs flush
@@ -161,6 +203,14 @@ static void battery_task(void *pvParameters)
 // ---------------------------------------------------------------------
 void app_main(void)
 {
+
+    /*esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);*/
+
     // ENABLE STEMMA QT else sda,scl pin low
     // Configure GPIO7 as output and set HIGH
     gpio_set_direction(GPIO_NUM_7, GPIO_MODE_OUTPUT);
@@ -177,13 +227,13 @@ void app_main(void)
     i2c_scan(); // optional: see which addresses appear (should see 0x28, maybe 0x36, etc.)
 
     // Initialize the motor (servo)
-    motor_init();
+    //motor_init();
 
     // Initialize the CO2 sensor (Calibration, ABOC, etc.)	
     co2sensor_init(330);  // 330 ppm reference for calibration
 
-    // Enable timer wakeup for deep sleep (in microseconds)
-    esp_sleep_enable_timer_wakeup(9 * 60 * 1000000ULL);  // 9 minutes
+    //wifi_init_sta();
+    //mqtt_start();
 
     // Check if MAX17048 is present
     esp_err_t ret = max17048_init_check();
