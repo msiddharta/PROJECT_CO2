@@ -3,256 +3,260 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "esp_log.h"
-#include "driver/gpio.h"
 #include "esp_sleep.h"
-#include "mqtt_client.h"
+#include "driver/gpio.h"
 #include "esp_wifi.h"
-#include "nvs_flash.h"
 
 #include "motor.h"
 #include "co2sensor.h"
-#include "max17048_adv.h"  // The advanced IDF-based code for MAX17048
-#include "i2c_bus.h"     // The I2C bus driver
-#include "battery.h"     // The battery monitor code
-#include "mqtt.h"       // The MQTT client code
+#include "battery.h"
+#include "max17048_adv.h"
+#include "i2c_bus.h"
+#include "mqtt.h"
 
-// FreeRTOS event bits
 #define CO2_HIGH_EVENT (1 << 0)
 #define CO2_LOW_EVENT  (1 << 1)
+#define CO2_RECALIBRATE_EVENT (1 << 2)
+#define CO2_DATA_READY_EVENT  (1 << 3)
+#define CALIB_BUTTON_GPIO GPIO_NUM_0
+#define CO2_LOW_VALUE 500
 
 static EventGroupHandle_t xCO2EventGroup = NULL;
-static const char *TAG_MAIN = "MAIN";
-static const char *TAG_CO2 = "CO2";
+
+static const char *TAG_MAIN  = "MAIN";
 static const char *TAG_MOTOR = "MOTOR";
-static const char *TAG_WIFI = "WIFI";
-static const char *TAG_BATT = "BATT";
+static const char *TAG_BATT  = "BATT";
 
 RTC_DATA_ATTR int last_motor_angle = -1;
 
-extern void wifi_init_sta(void);
-extern void mqtt_start(void);
-extern void publish_data(uint16_t co2_ppm, float voltage, float soc);
+typedef struct {
+    uint16_t co2_median;
+    float voltage;
+    float soc;
+} co2_data_t;
 
+static co2_data_t latest_data;  // Global variable to store the latest data
 
-// ---------------------------------------------------------------------
-// Motor task: waits for CO2 events to set servo angle
-// ---------------------------------------------------------------------
+static inline bool is_fresh_boot() {
+    return esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER;
+}
+
+static uint16_t calculate_median(uint16_t *data, int size) {
+    for (int i = 0; i < size - 1; i++)
+        for (int j = i + 1; j < size; j++)
+            if (data[i] > data[j]) {
+                uint16_t tmp = data[i];
+                data[i] = data[j];
+                data[j] = tmp;
+            }
+    return (data[(size - 1) / 2] + data[size / 2]) / 2;
+}
+
 static void motor_task(void *pvParameters) {
-    // Check wakeup reason
-    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-    bool fresh_boot = (wakeup_reason != ESP_SLEEP_WAKEUP_TIMER);
+    bool cold_boot = is_fresh_boot();
+    motor_init();
 
-    motor_init(); // Initialize the motor (servo)
-
-    if (fresh_boot) {
-        ESP_LOGI(TAG_MOTOR, "Cold boot motor test: 0° to 90° to 0°");
+    if (cold_boot && last_motor_angle == -1) {
+        ESP_LOGI(TAG_MOTOR, "Motor test (cold boot): 180° -> 0°");
+        motor_set_angle(180);
+        vTaskDelay(pdMS_TO_TICKS(1000));
         motor_set_angle(0);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        motor_set_angle(90);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        motor_set_angle(0);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        last_motor_angle = 0;  // Ensure alignment
-    }
-    
-    // Restore last known angle from RTC memory
-    if (last_motor_angle >= 0) {
-        ESP_LOGI(TAG_MOTOR, "Restoring last motor angle: %d°", last_motor_angle);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        last_motor_angle = 0;
+    } else if (last_motor_angle >= 0) {
+        ESP_LOGI(TAG_MOTOR, "Restoring motor angle: %d°", last_motor_angle);
         motor_set_angle(last_motor_angle);
     }
 
     int current_angle = last_motor_angle;
 
-    while (true)
-    {
-        // Wait for CO2 events (clear bits on exit)
-        EventBits_t bits = xEventGroupWaitBits(
-            xCO2EventGroup,
-            CO2_HIGH_EVENT | CO2_LOW_EVENT,
-            pdTRUE,
-            pdFALSE,
-            portMAX_DELAY);
+    while (true) {
+        EventBits_t bits = xEventGroupWaitBits(xCO2EventGroup,
+                                               CO2_HIGH_EVENT | CO2_LOW_EVENT,
+                                               pdTRUE, pdFALSE, portMAX_DELAY);
 
         int target_angle = -1;
 
-        if (bits & CO2_HIGH_EVENT) {
+        if (bits & CO2_HIGH_EVENT){
             target_angle = 90;
-        } 
+        }
         else if (bits & CO2_LOW_EVENT) {
             target_angle = 0;
         }
 
         if (target_angle >= 0 && target_angle != current_angle) {
-            ESP_LOGI(TAG_MOTOR, "Changing motor angle: %d° → %d°", current_angle, target_angle);
+            ESP_LOGI(TAG_MOTOR, "Motor angle: %d° → %d°", current_angle, target_angle);
             motor_set_angle(target_angle);
-            last_motor_angle  = target_angle;
-        } 
-        else {
-            ESP_LOGI(TAG_MOTOR, "No motor change needed (angle already %d°)", current_angle);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            last_motor_angle = current_angle = target_angle;
+        } else {
+            ESP_LOGI(TAG_MOTOR, "Motor unchanged: %d°", current_angle);
         }
-
     }
 }
 
-// ---------------------------------------------------------------------
-// CO2 sensor task: uses co2sensor_xxx calls
-// ---------------------------------------------------------------------
-static void co2sensor_task(void *pvParameters)
-{
-    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-    bool fresh_boot = (wakeup_reason != ESP_SLEEP_WAKEUP_TIMER);
+static void co2_measure_task(void *pvParameters) {
+    ESP_LOGI("CO2", "CO2 measurement task started");
 
-    if (fresh_boot) {
-        ESP_LOGI(TAG_CO2, "Cold boot: running stabilization for 2 minutes");
-        for (int i = 0; i < 60; i++) {
+    if (is_fresh_boot()) {
+        ESP_LOGI("CO2", "Cold boot detected → soft resetting & calibrating sensor");
+        co2sensor_soft_reset();
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        co2sensor_calibrate(CO2_LOW_VALUE);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+
+        ESP_LOGI("CO2", "Taking 6 dummy measurements after calibration");
+        for (int i = 0; i < 6; i++) {
             trigger_single_measurement();
-            co2sensor_read_co2(); // discard
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            uint16_t dummy;
+            co2sensor_read_co2(&dummy);
+            vTaskDelay(pdMS_TO_TICKS(10000));
         }
-        ESP_LOGI(TAG_CO2, "Stabilization complete");
-    } else {
-        ESP_LOGI(TAG_CO2, "Wake from deep sleep: skipping stabilization and delay");
     }
 
-    // Do sampling now (always)
+    ESP_LOGI("CO2", "Taking actual measurements...");
     uint16_t readings[6];
     for (int i = 0; i < 6; i++) {
         trigger_single_measurement();
-        readings[i] = co2sensor_read_co2();
-        ESP_LOGI(TAG_CO2, "Sample %d: %d ppm", i + 1, readings[i]);
-        vTaskDelay(pdMS_TO_TICKS(10000));  // 10 sec delay
+        co2sensor_read_co2(&readings[i]);
+        ESP_LOGI("CO2", "Reading %d = %d ppm", i + 1, readings[i]);
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 
-    // Sort readings (bubble sort)
-    for (int i = 0; i < 5; i++) {
-        for (int j = i + 1; j < 6; j++) {
-            if (readings[i] > readings[j]) {
-                uint16_t tmp = readings[i];
-                readings[i] = readings[j];
-                readings[j] = tmp;
-            }
+    latest_data.co2_median = calculate_median(readings, 6);
+    latest_data.voltage = battery_get_voltage();
+    latest_data.soc = battery_get_soc();
+
+    ESP_LOGI("CO2", "Median CO2 = %d ppm | Voltage = %.2f V | SOC = %.2f%%",
+        latest_data.co2_median, latest_data.voltage, latest_data.soc);
+
+    if (latest_data.soc < 5.0f) {
+        ESP_LOGW("CO2", "Low battery, overriding motor to 180°");
+        motor_set_angle(180);
+        last_motor_angle = 180;
+    } else {
+        if (latest_data.co2_median > 1000){
+            ESP_LOGI("CO2", "High CO2 detected → setting HIGH event");
+            xEventGroupSetBits(xCO2EventGroup, CO2_HIGH_EVENT);
+        }
+        else{
+            ESP_LOGI("CO2", "Low CO2 detected → setting LOW event");
+            xEventGroupSetBits(xCO2EventGroup, CO2_LOW_EVENT);
         }
     }
 
-    uint16_t median = (readings[2] + readings[3]) / 2;
-    ESP_LOGI(TAG_CO2, "CO2 Median: %d ppm", median);
-
-    if (median > 1000)
-        xEventGroupSetBits(xCO2EventGroup, CO2_HIGH_EVENT);
-    else
-        xEventGroupSetBits(xCO2EventGroup, CO2_LOW_EVENT);
-
-    
-    // Publish data to MQTT broker
-    float voltage = battery_get_voltage();
-    float soc = battery_get_soc();
-    publish_data(median, voltage, soc);
-
-    ESP_LOGI(TAG_WIFI, "Stopping Wi-Fi and MQTT client");
-    //mqtt_stop();
-    //esp_wifi_stop();
-
-    ESP_LOGI(TAG_CO2, "Preparing to enter deep sleep for 9 minutes...");
-    esp_sleep_enable_timer_wakeup(9 * 60 * 1000000ULL);  // 9 min in µs
-    vTaskDelay(pdMS_TO_TICKS(200));  // Let logs flush
-    esp_deep_sleep_start();  // Never returns
+    ESP_LOGI("CO2", "Setting CO2_DATA_READY_EVENT");
+    xEventGroupSetBits(xCO2EventGroup, CO2_DATA_READY_EVENT);
+    vTaskDelete(NULL);
 }
 
+static void mqtt_task(void *pvParameters) {
+    ESP_LOGI("MQTT", "Starting MQTT task");
+    wifi_init_sta();
+    mqtt_start();
+    vTaskDelay(pdMS_TO_TICKS(1000));  // until MQTT ready
 
-// ---------------------------------------------------------------------
-// Battery task: uses advanced MAX17048 features
-// ---------------------------------------------------------------------
-static void battery_task(void *pvParameters)
-{
-    // Optionally set advanced features
-    max17048_set_alert_voltages(3.3f, 4.2f);
-    float minv, maxv;
-    if (max17048_get_alert_voltages(&minv, &maxv) == ESP_OK) {
-        ESP_LOGI(TAG_BATT, "Alert voltages=%.2f ~ %.2f", minv, maxv);
+    if (is_fresh_boot()) {
+        ESP_LOGI("MQTT", "Cold boot → sending MQTT discovery message");
+        mqtt_discovery_publish();
     }
 
-    while (true)
-    {
-        extern float battery_get_voltage(void);
-        extern float battery_get_soc(void);
+    ESP_LOGI("MQTT", "Waiting for CO2_DATA_READY_EVENT...");
+    EventBits_t bits = xEventGroupWaitBits(xCO2EventGroup, CO2_DATA_READY_EVENT, pdTRUE, pdFALSE, portMAX_DELAY);
 
+    if (bits & CO2_DATA_READY_EVENT) {
+        publish_data(latest_data.co2_median, latest_data.voltage, latest_data.soc);
+        ESP_LOGI("MQTT", "Publishing: CO2=%d ppm, V=%.2f, SOC=%.2f", latest_data.co2_median, latest_data.voltage, latest_data.soc);
+    }
+
+    else{
+        ESP_LOGW("MQTT", "Timeout waiting for CO2 data — not publishing");
+    }
+
+    mqtt_stop();
+    esp_wifi_stop();
+
+    ESP_LOGI("MQTT", "Entering deep sleep for 9 minutes");
+    esp_sleep_enable_timer_wakeup(9 * 60 * 1000000ULL);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    esp_deep_sleep_start();
+}
+
+static void battery_task(void *pvParameters) {
+    max17048_set_alert_voltages(3.3f, 4.2f);
+    float minv, maxv;
+    if (max17048_get_alert_voltages(&minv, &maxv) == ESP_OK)
+        ESP_LOGI(TAG_BATT, "Alert voltages = %.2f ~ %.2f", minv, maxv);
+
+    while (true) {
         float voltage = battery_get_voltage();
         float percent = battery_get_soc();
 
-        if (voltage < 0.0f || percent < 0.0f) {
+        if (voltage < 0.0f || percent < 0.0f)
             ESP_LOGE(TAG_BATT, "Battery read error!");
-        } else {
-            ESP_LOGI(TAG_BATT, "Voltage=%.3f V, SoC=%.2f %%", voltage, percent);
-        }
+        else
+            ESP_LOGI(TAG_BATT, "Battery: %.3f V, %.2f %%", voltage, percent);
 
-        // Check if any advanced alerts triggered
         uint8_t flags = max17048_get_alert_flags();
         if (flags) {
-            ESP_LOGW(TAG_BATT, "Alert flags=0x%02X", flags);
-            // e.g. if (flags & MAX1704X_ALERTFLAG_VOLTAGE_LOW) ...
-            max17048_clear_alert_flag(flags); // Clear them all or choose which bits
+            ESP_LOGW(TAG_BATT, "Alert flags = 0x%02X", flags);
+            max17048_clear_alert_flag(flags);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(10 * 60 * 1000));  // 10 minutes
+        vTaskDelay(pdMS_TO_TICKS(600000)); // 10 min
     }
 }
 
-// ---------------------------------------------------------------------
-// app_main: main entry point for ESP-IDF application
-// This is where we initialize everything and create tasks.
-// ---------------------------------------------------------------------
-void app_main(void)
-{
-
-    /*esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);*/
-
-    // ENABLE STEMMA QT else sda,scl pin low
-    // Configure GPIO7 as output and set HIGH
+void app_main(void) {
     gpio_set_direction(GPIO_NUM_7, GPIO_MODE_OUTPUT);
     gpio_set_level(GPIO_NUM_7, 1);
-    // Create event group for motor and co2 sensor
+
     xCO2EventGroup = xEventGroupCreate();
     if (!xCO2EventGroup) {
-        ESP_LOGE(TAG_MAIN, "Failed to create event group!");
+        ESP_LOGE(TAG_MAIN, "Event group creation failed");
         return;
     }
 
-    // Initialize I2C driver
     i2c_master_init();
-    i2c_scan(); // optional: see which addresses appear (should see 0x28, maybe 0x36, etc.)
+    i2c_scan();
 
-    // Initialize the motor (servo)
-    //motor_init();
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << CALIB_BUTTON_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
 
-    // Initialize the CO2 sensor (Calibration, ABOC, etc.)	
-    co2sensor_init(330);  // 330 ppm reference for calibration
+    /*if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0 &&
+        gpio_get_level(CALIB_BUTTON_GPIO) == 0) {
+        ESP_LOGW(TAG_MAIN, "Button wake → calibrating");
+        co2sensor_soft_reset();
+        vTaskDelay(pdMS_TO_TICKS(50));
+        co2sensor_calibrate(CO2_LOW_VALUE);
+    }*/
 
-    //wifi_init_sta();
-    //mqtt_start();
-
-    // Check if MAX17048 is present
-    esp_err_t ret = max17048_init_check();
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG_MAIN, "MAX17048 found!");
-        if (xTaskCreate(battery_task, "batteryTask", 4096, NULL, 5, NULL) != pdPASS) {
-            ESP_LOGE(TAG_MAIN, "Failed to create motorTask");
+    if (max17048_init_check() == ESP_OK) {
+        ESP_LOGI(TAG_MAIN, "MAX17048 found");
+        if (xTaskCreate(battery_task, "batteryTask", 4096, NULL, 2, NULL) != pdPASS) {
+            ESP_LOGE(TAG_MAIN, "Failed to create battery task");
         }
     } else {
-        ESP_LOGW(TAG_MAIN, "MAX17048 not found or no battery connected!");
-        // either skip creating battery task or create a minimal one
+        ESP_LOGW(TAG_MAIN, "Battery monitor not found");
     }
 
-    // 6) Create tasks
-    if (xTaskCreate(motor_task, "motorTask", 4096, NULL, 5, NULL) != pdPASS) {
-        ESP_LOGE(TAG_MAIN, "Failed to create motorTask");
+    if (xTaskCreate(motor_task, "motorTask", 4096, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG_MAIN, "Failed to create motor task");
     }
-    if (xTaskCreate(co2sensor_task, "co2Task", 2048, NULL, 5, NULL) != pdPASS) {
-        ESP_LOGE(TAG_MAIN, "Failed to create co2Task");
+    
+    if (xTaskCreate(co2_measure_task, "co2Task", 4096, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG_MAIN, "Failed to create CO₂ sensor task");
     }
-    ESP_LOGI(TAG_MAIN, "app_main done!");
+
+    if (xTaskCreate(mqtt_task, "mqttTask", 4096, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG_MAIN, "Failed to create CO₂ sensor task");
+    }
+   
+    ESP_LOGI(TAG_MAIN, "System initialized");
 }

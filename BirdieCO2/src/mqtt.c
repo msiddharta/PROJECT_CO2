@@ -1,4 +1,3 @@
-// mqtt.c
 #include <stdio.h>
 #include "esp_log.h"
 #include "mqtt_client.h"
@@ -13,8 +12,9 @@
 static const char *TAG = "MQTT";
 esp_mqtt_client_handle_t mqtt_client = NULL;
 
-#define WIFI_SSID "5G TOWER"
-#define WIFI_PASS "tyzp2501"
+#define WIFI_SSID "FRITZ!Box 5530 JF 2,4GHz"
+#define WIFI_PASS "68077886860568218716"
+#define WIFI_IP "mqtt://espuser:geheim123@192.168.178.44"
 #define MAX_RETRY 10
 
 static int retry_num = 0;
@@ -44,6 +44,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 }
 
 void wifi_init_sta(void) {
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
     wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -81,11 +88,43 @@ void wifi_init_sta(void) {
                         pdFALSE, pdFALSE, pdMS_TO_TICKS(10000));
 }
 
+void mqtt_discovery_publish() {
+    if (!mqtt_client) return;
+
+    // CO2 Sensor
+    esp_mqtt_client_publish(mqtt_client,
+        "homeassistant/sensor/birdie_co2/config",
+        "{\"name\": \"Birdie CO2\", \"state_topic\": \"home/birdie/co2\", "
+        "\"unit_of_measurement\": \"ppm\", \"device_class\": \"carbon_dioxide\", "
+        "\"unique_id\": \"birdie_co2\", \"value_template\": \"{{ value | int }}\", "
+        "\"device\": {\"identifiers\": [\"birdie_device\"], \"name\": \"Birdie Sensor\", \"model\": \"ESP32 CO2\", \"manufacturer\": \"GizmoLabs\"}}",
+        0, 1, 1);
+
+    // Voltage Sensor
+    esp_mqtt_client_publish(mqtt_client,
+        "homeassistant/sensor/birdie_voltage/config",
+        "{\"name\": \"Birdie Voltage\", \"state_topic\": \"home/birdie/voltage\", "
+        "\"unit_of_measurement\": \"V\", \"device_class\": \"voltage\", "
+        "\"unique_id\": \"birdie_voltage\", \"value_template\": \"{{ value | float }}\", "
+        "\"device\": {\"identifiers\": [\"birdie_device\"], \"name\": \"Birdie Sensor\", \"model\": \"ESP32 CO2\", \"manufacturer\": \"GizmoLabs\"}}",
+        0, 1, 1);
+
+    // Battery SoC Sensor
+    esp_mqtt_client_publish(mqtt_client,
+        "homeassistant/sensor/birdie_soc/config",
+        "{\"name\": \"Birdie Battery SoC\", \"state_topic\": \"home/birdie/soc\", "
+        "\"unit_of_measurement\": \"%\", \"device_class\": \"battery\", "
+        "\"unique_id\": \"birdie_soc\", \"value_template\": \"{{ value | float }}\", "
+        "\"device\": {\"identifiers\": [\"birdie_device\"], \"name\": \"Birdie Sensor\", \"model\": \"ESP32 CO2\", \"manufacturer\": \"GizmoLabs\"}}",
+        0, 1, 1);
+}
+
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t event_id, void *event_data) {
     switch ((esp_mqtt_event_id_t)event_id) {
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "Connected to MQTT broker");
+            mqtt_discovery_publish();  // ← Publish config on connect
             break;
         case MQTT_EVENT_DISCONNECTED:
             ESP_LOGW(TAG, "Disconnected from MQTT broker");
@@ -100,11 +139,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 
 void mqtt_start(void) {
     esp_mqtt_client_config_t config = {
-        .broker = {
-            .address = {
-                .uri = "mqtt://192.168.1.123"
-            }
-        }
+        .broker.address.uri = WIFI_IP
     };
 
     mqtt_client = esp_mqtt_client_init(&config);
@@ -122,6 +157,7 @@ void publish_data(uint16_t co2_ppm, float voltage, float soc) {
     if (!mqtt_client) return;
 
     char payload[64];
+
     snprintf(payload, sizeof(payload), "%u", co2_ppm);
     esp_mqtt_client_publish(mqtt_client, "home/birdie/co2", payload, 0, 1, 1);
 
