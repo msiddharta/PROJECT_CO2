@@ -14,7 +14,7 @@ esp_mqtt_client_handle_t mqtt_client = NULL;
 
 #define WIFI_SSID "FRITZ!Box 5530 JF 2,4GHz"
 #define WIFI_PASS "68077886860568218716"
-#define WIFI_IP "mqtt://espuser:geheim123@192.168.178.44"
+#define WIFI_IP "mqtt://espuser:geheim123@192.168.178.46"
 #define MAX_RETRY 10
 
 static int retry_num = 0;

@@ -3,7 +3,7 @@
 #include "driver/mcpwm_prelude.h"
 #include "esp_mac.h"
 
-static const char *TAG = "Motor";
+static const char *TAG = "MOTOR";
 
 static mcpwm_cmpr_handle_t comparator;
 
