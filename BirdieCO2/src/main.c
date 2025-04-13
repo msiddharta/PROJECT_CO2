@@ -315,7 +315,7 @@ static void co2_measure_task(void *pvParameters) {
 
     xSemaphoreGive(xSensorMutex);
     if (xCO2MeasureHandle != NULL) {
-        ESP_LOGW("CALIB", "Stopping running CO2 measurement task");
+        ESP_LOGW("CO2", "Stopping running CO2 measurement task");
         stop_measurement = true;
         vTaskDelay(pdMS_TO_TICKS(300));  // Give time for task to exit
         xCO2MeasureHandle = NULL;        // Let the task self-delete
