@@ -27,7 +27,7 @@
 // ---------------------------------------------------------------------------
 // Sensor Thresholds and Calibration Values
 // ---------------------------------------------------------------------------
-#define CO2_LOW_THRESHOLD             400    // CO₂ low threshold (ppm)
+#define CO2_LOW_THRESHOLD             350    // CO₂ low threshold (ppm)
 #define CO2_HIGH_THRESHOLD            1000   // CO₂ high threshold (ppm)
 #define SENSOR_PRESSURE_HPA           1017   // Pressure value (in hPa) used for sensor calibration
 #define CO2_DIFF_THRESHOLD           500     // CO₂ difference threshold for recalculation (ppm)
