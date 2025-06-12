@@ -79,4 +79,6 @@ esp_err_t i2c_read_u16_be(uint8_t dev_addr, uint8_t reg_addr, uint16_t *out);
  */
 esp_err_t i2c_write_u16_be(uint8_t dev_addr, uint8_t reg_addr, uint16_t val);
 
+esp_err_t i2c_master_probe(i2c_port_t i2c_num, uint8_t device_address, TickType_t timeout_ticks);
+
 #endif // I2C_BUS_H

@@ -13,7 +13,7 @@
 #define SERVO_MIN_PULSEWIDTH_US 500     // Minimum pulse width in microseconds (min servo position)
 #define SERVO_MAX_PULSEWIDTH_US 2500    // Maximum pulse width in microseconds (max servo position)  
 #define SERVO_MIN_DEGREE        0       // Minimum servo angle in degrees
-#define SERVO_MAX_DEGREE        180     // GPIO pin used for the servo's PWM signal
+#define SERVO_MAX_DEGREE        180     // Maximum servo angle in degrees
 #define SERVO_PULSE_GPIO        8       // GPIO pin used for the servo's PWM signal    
 #define SERVO_TIMEBASE_RESOLUTION_HZ 1000000    // Timer resolution for MCPWM (1 µs precision)  
 #define SERVO_TIMEBASE_PERIOD   20000       // PWM period in microseconds (typically 50Hz)

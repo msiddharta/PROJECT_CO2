@@ -27,7 +27,7 @@
 // ---------------------------------------------------------------------------
 // Sensor Thresholds and Calibration Values
 // ---------------------------------------------------------------------------
-#define CO2_LOW_THRESHOLD             350    // CO₂ low threshold (ppm)
+#define CO2_LOW_THRESHOLD             400    // CO₂ low threshold (ppm)
 #define CO2_HIGH_THRESHOLD            1000   // CO₂ high threshold (ppm)
 #define SENSOR_PRESSURE_HPA           1017   // Pressure value (in hPa) used for sensor calibration
 #define CO2_DIFF_THRESHOLD           500     // CO₂ difference threshold for recalculation (ppm)
@@ -69,9 +69,9 @@
 // ---------------------------------------------------------------------------
 // Motor Angle Definitions
 // ---------------------------------------------------------------------------
-#define MOTOR_ANGLE_LOW               0
+#define MOTOR_ANGLE_LOW               180     //for assembly puposes low = 180°
 #define MOTOR_ANGLE_MED               90
-#define MOTOR_ANGLE_HIGH              180
+#define MOTOR_ANGLE_HIGH              0   //for assembly puposes high = 0°
 #define MOTOR_ANGLE_UNDEFINED           -1
 // ---------------------------------------------------------------------------
 

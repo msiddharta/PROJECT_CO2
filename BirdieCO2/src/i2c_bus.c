@@ -200,3 +200,13 @@ esp_err_t i2c_write_u16_be(uint8_t dev_addr, uint8_t reg_addr, uint16_t val) {
     // Use the generic I2C write function to write the two-byte buffer to the device.
     return i2c_write_bytes(dev_addr, reg_addr, buf, 2);
 }
+esp_err_t i2c_master_probe(i2c_port_t i2c_num, uint8_t device_address, TickType_t timeout_ticks) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (device_address << 1) | I2C_MASTER_WRITE, true);  // Just address + write bit
+    i2c_master_stop(cmd);
+
+    esp_err_t err = i2c_master_cmd_begin(i2c_num, cmd, timeout_ticks);
+    i2c_cmd_link_delete(cmd);
+    return err;
+}

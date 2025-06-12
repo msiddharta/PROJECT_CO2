@@ -190,7 +190,7 @@ static void motor_task(void *pvParameters) {
         motor_set_angle(MOTOR_ANGLE_LOW);
         vTaskDelay(pdMS_TO_TICKS(TIME_SHORT_DELAY_MS));
         sensor_state.last_motor_angle = MOTOR_ANGLE_LOW;
-    } else if (sensor_state.last_motor_angle >= MOTOR_ANGLE_LOW) {
+    } else if (sensor_state.last_motor_angle <= MOTOR_ANGLE_LOW) { //for assembly purposes, else >=
         ESP_LOGI(TAG_MOTOR, "Restoring motor angle: %d°", sensor_state.last_motor_angle);
         motor_set_angle(sensor_state.last_motor_angle);
     }
